@@ -1,191 +1,102 @@
-#include "stepper.h"
-#include <math.h>
 #include <stdio.h>
+#include <inttypes.h>
+#include "sdkconfig.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_chip_info.h"
+#include "esp_flash.h"
+#include "esp_system.h"
+#include "driver/ledc.h"
+#include "esp_err.h"
 
+// PWM Configuration
+#define PWM_FREQ_HZ      1500
+#define PWM_RESOLUTION   LEDC_TIMER_8_BIT
+#define PWM_MAX_DUTY     255  // (2^8) - 1
+#define FADE_TIME_MS     6000
 
-typedef struct {
-    double x;
-    double y;
-} PointCartisian;
+// GPIO Pins
+#define GPIO_PIN_19      19
+#define GPIO_PIN_33      33
 
-typedef struct {
-    double r;
-    double theta;
-} PointPolar;
+void app_main(void)
+{
+    printf("Hello world!\n");
+    printf("Setting up PWM fade on pins 19 and 33...\n");
 
-typedef struct {
-    PointCartisian LT;
-    PointCartisian RT;
-    PointCartisian LB;
-    PointCartisian RB;
-} RobotWheels;
-
-typedef struct {
-    double x;
-    double y;
-    double theta;
-} Input;
-double pi = 3.14159265358979323846;
-StepperMotor motor1;
-StepperMotor motor2;
-StepperMotor motor3;
-StepperMotor motor4;
-const int pins[] = {23, 19, 22, 18};//
-const int pins2[] = {5, 16, 17, 4};
-const int pins3[] = {32, 25, 33, 26};
-const int pins4[] = {27, 13, 14, 21};
-const int stepsPerRevolution = 200;
-const double wheelDiameter = 80.0;
-
-
-
-PointCartisian rotate(PointCartisian wheel, double theta);
-PointCartisian toCartesian(PointPolar p);
-PointPolar toPolar(PointCartisian p);
-PointCartisian translate(PointCartisian wheel, PointCartisian input);
-RobotWheels moveRobot(RobotWheels robot, Input move);
-PointCartisian convToUnitVector(PointCartisian start, PointCartisian end);
-bool sign (double x);
-int toSteps(double inches, double wheelDiameter,int stepsPerRevolution);
-double totalmove(PointCartisian start, PointCartisian end);
-
-
-
-
-
-PointCartisian toCartesian(PointPolar p) {
-    return (PointCartisian){p.r * cos(p.theta), p.r * sin(p.theta)};
-}
-
-PointPolar toPolar(PointCartisian p) {
-    return (PointPolar){sqrt(p.x * p.x + p.y * p.y), atan2(p.y, p.x)};
-}
-
-
-
-
-PointCartisian rotate(PointCartisian wheel, double theta){
-    PointPolar rotated = toPolar(wheel);
-    rotated.theta += theta;
-    PointCartisian newCoordinates = toCartesian(rotated);
-    return newCoordinates;
-}
-
-PointCartisian translate(PointCartisian wheel, PointCartisian input){
-    PointCartisian newCoordinates = {wheel.x + input.x, wheel.y + input.y};
-    return newCoordinates;
-}
-
-RobotWheels moveRobot(RobotWheels robot, Input move){
-    RobotWheels newRobot;
-    newRobot.LT = rotate(robot.LT, move.theta);
-    printf("newRobot.LT: %f, %f\n", newRobot.LT.x, newRobot.LT.y);
-    newRobot.RT = rotate(robot.RT, move.theta);
-    printf("newRobot.RT: %f, %f\n", newRobot.RT.x, newRobot.RT.y);
-    newRobot.LB = rotate(robot.LB, move.theta);
-    printf("newRobot.LB: %f, %f\n", newRobot.LB.x, newRobot.LB.y);
-    newRobot.RB = rotate(robot.RB, move.theta);
-    printf("newRobot.RB: %f, %f\n", newRobot.RB.x, newRobot.RB.y);
-    newRobot.LT = translate(newRobot.LT, (PointCartisian){move.x, move.y});
-    newRobot.RT = translate(newRobot.RT, (PointCartisian){move.x, move.y});
-    newRobot.LB = translate(newRobot.LB, (PointCartisian){move.x, move.y});
-    newRobot.RB = translate(newRobot.RB, (PointCartisian){move.x, move.y});
-    return newRobot;
-}
-
-    
-PointCartisian convToUnitVector(PointCartisian start, PointCartisian end){
-    PointCartisian p = {end.x - start.x, end.y - start.y};
-    // double direction_x = sign(end.x);
-    // double direction_y = sign(end.y);
-    if(p.x < 0.001 && p.x > -0.001 && p.y < 0.001 && p.y > -0.001){
-        PointCartisian unitVector = {0, 0};
-        return unitVector;
+    // Configure LEDC timer
+    ledc_timer_config_t ledc_timer = {
+        .speed_mode      = LEDC_LOW_SPEED_MODE,
+        .timer_num       = LEDC_TIMER_0,
+        .duty_resolution = PWM_RESOLUTION,
+        .freq_hz         = PWM_FREQ_HZ,
+        .clk_cfg         = LEDC_AUTO_CLK
+    };
+    esp_err_t err = ledc_timer_config(&ledc_timer);
+    if (err != ESP_OK) {
+        printf("LEDC timer config failed: %s\n", esp_err_to_name(err));
+        return;
     }
-    double magnitude = sqrt(p.x * p.x + p.y * p.y);
-    PointCartisian unitVector = {p.x / magnitude, p.y / magnitude};
-    return unitVector;
-}
-int toSteps(double mm, double wheelDiameter,int stepsPerRevolution){
-    double circumference = 3.14159265358979323846 * wheelDiameter;
-    return (mm / circumference) * stepsPerRevolution;
-}
 
-double totalmove(PointCartisian start, PointCartisian end){
-    double x = end.x - start.x;
-    double y = end.y - start.y;
-    return sqrt(x*x + y*y);
-}
-bool sign(double value){
-    if(value < 0){
-        return false;
+    // Configure channel for pin 19
+    ledc_channel_config_t ledc_channel_19 = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel    = LEDC_CHANNEL_0,
+        .timer_sel  = LEDC_TIMER_0,
+        .intr_type  = LEDC_INTR_DISABLE,
+        .gpio_num   = GPIO_PIN_19,
+        .duty       = 0,
+        .hpoint     = 0
+    };
+    err = ledc_channel_config(&ledc_channel_19);
+    if (err != ESP_OK) {
+        printf("LEDC channel 19 config failed: %s\n", esp_err_to_name(err));
+        return;
     }
-    return true;
-}
-  
-void app_main() {
-    
-    initStepperTimer();
 
-    RobotWheels robot = {{-100, 52}, {100, 52}, {-100, -52}, {100, -52}};
-    
-    PointCartisian LT = robot.LT;
-    PointCartisian RT = robot.RT;
-    PointCartisian LB = robot.LB;
-    PointCartisian RB = robot.RB;
+    // Configure channel for pin 33
+    ledc_channel_config_t ledc_channel_33 = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel    = LEDC_CHANNEL_1,
+        .timer_sel  = LEDC_TIMER_0,
+        .intr_type  = LEDC_INTR_DISABLE,
+        .gpio_num   = GPIO_PIN_33,
+        .duty       = 0,
+        .hpoint     = 0
+    };
+    err = ledc_channel_config(&ledc_channel_33);
+    if (err != ESP_OK) {
+        printf("LEDC channel 33 config failed: %s\n", esp_err_to_name(err));
+        return;
+    }
 
-    double input[3] = {-1000,0,0};//use radians 
-    Input move = {input[0], input[1], input[2]};
-    Input moveSmall = {move.x / 100000, move.y / 100000, move.theta / 100000};
-    robot = moveRobot(robot, moveSmall);
-    printf("robot: %f, %f, %f, %f, %f, %f, %f, %f\n", robot.LT.x, robot.LT.y, robot.RT.x, robot.RT.y, robot.LB.x, robot.LB.y, robot.RB.x, robot.RB.y);
-    printf("moveSmall: %f, %f, %f\n", moveSmall.x, moveSmall.y, moveSmall.theta);
+    // Initialize fade service
+    err = ledc_fade_func_install(0);
+    if (err != ESP_OK) {
+        printf("LEDC fade install failed: %s\n", esp_err_to_name(err));
+        return;
+    }
 
-    PointCartisian LTvec = convToUnitVector(LT, robot.LT);
-    PointCartisian RTvec = convToUnitVector(RT, robot.RT);
-    PointCartisian LBvec = convToUnitVector(LB, robot.LB);
-    PointCartisian RBvec = convToUnitVector(RB, robot.RB);
-    
-    
-    int LTsteps = toSteps(totalmove(LT, robot.LT)* 100000, wheelDiameter, 200) ;
-    int RTsteps = toSteps(totalmove(RT, robot.RT)* 100000, wheelDiameter, 200) ;
-    int LBsteps = toSteps(totalmove(LB, robot.LB)* 100000, wheelDiameter, 200) ;
-    int RBsteps = toSteps(totalmove(RB, robot.RB)* 100000, wheelDiameter, 200) ;
+    printf("PWM setup complete on pins 19 and 33.\n");
 
-    double LTspeed = (LTvec.y+LTvec.x) / 2;
-    double RTspeed = (RTvec.y-RTvec.x) / 2;
-    double LBspeed = (LBvec.y-LBvec.x) / 2;
-    double RBspeed = (RBvec.y+RBvec.x) / 2;
-    
-    LTspeed = LTspeed * 500;
-    RTspeed = RTspeed * 500;
-    LBspeed = LBspeed * 500;
-    RBspeed = RBspeed * 500;
-   
-    printf("LTsteps: %d, RTsteps: %d, LBsteps: %d, RBsteps: %d\n", LTsteps, RTsteps, LBsteps, RBsteps);
-    printf("LTvec.x: %f, LTvec.y: %f, RTvec.x: %f, RTvec.y: %f, LBvec.x: %f, LBvec.y: %f, RBvec.x: %f, RBvec.y: %f\n", LTvec.x, LTvec.y, RTvec.x, RTvec.y, LBvec.x, LBvec.y, RBvec.x, RBvec.y);
-    printf("LTvec: %f, %f, RTvec: %f, %f, LBvec: %f, %f, RBvec: %f, %f\n", LTvec.x, LTvec.y, RTvec.x, RTvec.y, LBvec.x, LBvec.y, RBvec.x, RBvec.y);
-    printf("LTvec: %f, %f, RTvec: %f, %f, LBvec: %f, %f, RBvec: %f, %f\n", LTvec.x, LTvec.y, RTvec.x, RTvec.y, LBvec.x, LBvec.y, RBvec.x, RBvec.y);
+    vTaskDelay(3000 / portTICK_PERIOD_MS);
+int counter = 0;
+    // Fade up and down loop
+    while (counter < 3) {
+        // Fade up to max duty on both pins
+        printf("Fading up...\n");
+        ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, PWM_MAX_DUTY, FADE_TIME_MS);
+        ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, PWM_MAX_DUTY, FADE_TIME_MS);
+        ledc_fade_start(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, LEDC_FADE_NO_WAIT);
+        ledc_fade_start(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, LEDC_FADE_WAIT_DONE);
 
-
-    // Set up motor movement
-    setUpMovement(&motor1, pins, fabs(LTspeed), (int)abs(LTsteps),  !sign(LTspeed));
-    setUpMovement(&motor2, pins2, fabs(RTspeed), (int)abs(RTsteps), sign(RTspeed));
-    setUpMovement(&motor3, pins3, fabs(LBspeed), (int)abs(LBsteps), !sign(LBspeed));
-    setUpMovement(&motor4, pins4, fabs(RBspeed), (int)abs(RBsteps), sign(RBspeed));
-    // Main loop
-
-    printf("LTspeed: %f, RTspeed: %f, LBspeed: %f, RBspeed: %f\n", LTspeed, RTspeed, LBspeed, RBspeed);
-    printf("LTsteps: %d, RTsteps: %d, LBsteps: %d, RBsteps: %d\n", LTsteps, RTsteps, LBsteps, RBsteps);
-    printf("LTvec.x: %f, LTvec.y: %f, RTvec.x: %f, RTvec.y: %f, LBvec.x: %f, LBvec.y: %f, RBvec.x: %f, RBvec.y: %f\n", LTvec.x, LTvec.y, RTvec.x, RTvec.y, LBvec.x, LBvec.y, RBvec.x, RBvec.y);
-    printf("LTvec: %f, %f, RTvec: %f, %f, LBvec: %f, %f, RBvec: %f, %f\n", LTvec.x, LTvec.y, RTvec.x, RTvec.y, LBvec.x, LBvec.y, RBvec.x, RBvec.y);
-    printf("LTvec: %f, %f, RTvec: %f, %f, LBvec: %f, %f, RBvec: %f, %f\n", LTvec.x, LTvec.y, RTvec.x, RTvec.y, LBvec.x, LBvec.y, RBvec.x, RBvec.y);
-    while (1) {
-        if (isTimerTickReady()) {
-            stepMotor(&motor1);
-            stepMotor(&motor2);
-            stepMotor(&motor3);
-            stepMotor(&motor4);
-        }
+        // Fade down to 0 on both pins
+        printf("Fading down...\n");
+        ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0, FADE_TIME_MS);
+        ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0, FADE_TIME_MS);
+        ledc_fade_start(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, LEDC_FADE_NO_WAIT);
+        ledc_fade_start(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, LEDC_FADE_WAIT_DONE);
+        printf("Counter: %d\n", counter);
+        counter++;
     }
 }
